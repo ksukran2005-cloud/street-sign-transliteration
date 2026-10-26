@@ -1,35 +1,35 @@
-import os
+﻿import os
 import re
 import uuid
+import logging
+import threading
 
-os.environ["FLAGS_use_mkldnn"] = "0"
-
-from fastapi import (
-    FastAPI,
-    HTTPException,
-    UploadFile,
-    File,
-)
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 
 from transliterate import transliterate
 from auto_language import detect_language
 from image_preprocessing import preprocess_image
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+MAX_UPLOAD_SIZE = 5 * 1024 * 1024
+
+LANGUAGES = {
+    "hi": "Hindi",
+    "te": "Telugu",
+    "ta": "Tamil",
+    "kn": "Kannada",
+}
+
+processing_lock = threading.Lock()
 
 app = FastAPI(
     title="Street Sign Transliteration API",
-    version="1.0.0",
-    description=(
-        "OCR, automatic Indian language detection, "
-        "and Roman-script transliteration API"
-    ),
+    version="1.1.0",
+    description="OCR, language detection, and Roman-script transliteration API",
 )
-
-
-# --------------------------------------------------
-# CORS
-# --------------------------------------------------
 
 app.add_middleware(
     CORSMiddleware,
@@ -40,381 +40,224 @@ app.add_middleware(
 )
 
 
-# --------------------------------------------------
-# Supported Languages
-# --------------------------------------------------
-
-LANGUAGES = {
-    "hi": "Hindi",
-    "te": "Telugu",
-    "ta": "Tamil",
-    "kn": "Kannada",
-}
-
-
-# --------------------------------------------------
-# Root Endpoint
-# --------------------------------------------------
-
 @app.get("/")
 def root():
     return {
         "status": "running",
         "service": "Street Sign Transliteration API",
-        "pipeline": (
-            "Image → Preprocessing → Language Detection "
-            "→ OCR → Transliteration"
-        ),
-        "supported_languages": list(LANGUAGES.keys()),
+        "supported_languages": LANGUAGES,
+        "maximum_upload_size_mb": 5,
     }
 
 
-# --------------------------------------------------
-# Process Image
-# --------------------------------------------------
-
 @app.post("/process-image")
-async def process_image(
-    file: UploadFile = File(...),
-):
+async def process_image(file: UploadFile = File(...)):
     if not file.filename:
         raise HTTPException(
             status_code=400,
-            detail="Please select an image to continue.",
+            detail="Please select an image.",
+        )
+
+    allowed_types = {
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "image/bmp",
+    }
+
+    if file.content_type not in allowed_types:
+        raise HTTPException(
+            status_code=400,
+            detail="Upload a JPEG, PNG, WEBP, or BMP image.",
         )
 
     unique_id = uuid.uuid4().hex
-    safe_filename = os.path.basename(file.filename)
-
-    original_path = f"temp_{unique_id}_{safe_filename}"
+    original_path = f"temp_{unique_id}.img"
     processed_path = f"processed_{unique_id}.jpg"
 
     try:
-        # ------------------------------------------
-        # Read and Save Uploaded Image
-        # ------------------------------------------
-
-        contents = await file.read()
+        contents = await file.read(MAX_UPLOAD_SIZE + 1)
 
         if not contents:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    "The selected file is empty. "
-                    "Please choose another image."
-                ),
+                detail="The uploaded file is empty.",
             )
 
-        with open(original_path, "wb") as f:
-            f.write(contents)
-
-        # ------------------------------------------
-        # Image Preprocessing
-        # ------------------------------------------
-
-        preprocess_image(
-            original_path,
-            processed_path,
-        )
-
-        if not os.path.exists(processed_path):
+        if len(contents) > MAX_UPLOAD_SIZE:
             raise HTTPException(
-                status_code=400,
-                detail=(
-                    "We couldn't prepare this image. "
-                    "Please try another image."
-                ),
+                status_code=413,
+                detail="Image size must not exceed 5 MB.",
             )
 
-        # ------------------------------------------
-        # Language Detection and OCR
-        # ------------------------------------------
+        with open(original_path, "wb") as image_file:
+            image_file.write(contents)
 
-        detected_language, detection_score, ocr_results = (
-            detect_language(processed_path)
-        )
+        del contents
 
-        if detected_language not in LANGUAGES:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "We couldn't identify a supported language. "
-                    "Please upload a clear street sign in "
-                    "Hindi, Telugu, Tamil, or Kannada."
-                ),
-            )
+        with processing_lock:
+            preprocess_image(original_path, processed_path)
 
-        # ------------------------------------------
-        # Check OCR Results
-        # ------------------------------------------
-
-        if not ocr_results:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "We couldn't recognize any text in this image. "
-                    "Try a clearer, well-lit street-sign photo."
-                ),
-            )
-
-        # Remove empty OCR detections and isolated
-        # single-character results.
-        usable_results = [
-            item
-            for item in ocr_results
-            if len(
-                "".join(
-                    item["original_text"].split()
-                )
-            ) >= 2
-        ]
-
-        if not usable_results:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "The image is too blurry to read reliably. "
-                    "Please upload a clearer street-sign photo."
-                ),
-            )
-
-        ocr_results = usable_results
-
-        # ------------------------------------------
-        # Sort OCR Results by Reading Position
-        # ------------------------------------------
-
-        sorted_items = sorted(
-            ocr_results,
-            key=lambda item: (
-                (
-                    item["box"][1]
-                    + item["box"][3]
-                ) / 2,
-                item["box"][0],
-            ),
-        )
-
-        # ------------------------------------------
-        # Group OCR Text by Line
-        # ------------------------------------------
-
-        grouped_lines = []
-
-        for item in sorted_items:
-            text = item["original_text"].strip()
-            box = item["box"]
-
-            if not text:
-                continue
-
-            center_y = (
-                box[1] + box[3]
-            ) / 2
-
-            item_height = max(
-                1,
-                box[3] - box[1],
-            )
-
-            matched_line = None
-
-            for line in grouped_lines:
-                line_height = max(
-                    entry["box"][3] - entry["box"][1]
-                    for entry in line["items"]
+            if not os.path.exists(processed_path):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Unable to prepare the image.",
                 )
 
-                vertical_tolerance = max(
-                    15,
-                    max(item_height, line_height) * 0.5,
+            detected_language, detection_score, ocr_results = (
+                detect_language(processed_path)
+            )
+
+            if detected_language not in LANGUAGES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "No supported language detected. Upload a clear "
+                        "Hindi, Telugu, Tamil, or Kannada street sign."
+                    ),
                 )
 
-                if abs(
-                    center_y - line["center_y"]
-                ) <= vertical_tolerance:
-                    matched_line = line
-                    break
-
-            if matched_line is None:
-                grouped_lines.append({
-                    "center_y": center_y,
-                    "items": [item],
-                })
-            else:
-                matched_line["items"].append(item)
-
-                matched_line["center_y"] = sum(
-                    (
-                        entry["box"][1]
-                        + entry["box"][3]
-                    ) / 2
-                    for entry in matched_line["items"]
-                ) / len(matched_line["items"])
-
-        grouped_lines.sort(
-            key=lambda line: line["center_y"]
-        )
-
-        # ------------------------------------------
-        # Combine Lines and Transliterate
-        # ------------------------------------------
-
-        results = []
-
-        for line in grouped_lines:
-            line_items = sorted(
-                line["items"],
-                key=lambda item: item["box"][0],
-            )
-
-            text = " ".join(
-                item["original_text"].strip()
-                for item in line_items
-                if item["original_text"].strip()
-            )
-
-            # Remove trailing hyphens and dash characters.
-            text = re.sub(
-                r"[-‐-‒–—]+$",
-                "",
-                text,
-            ).strip()
-
-            if not text:
-                continue
-
-            # --------------------------------------
-            # Transliteration
-            # --------------------------------------
-
-            roman = transliterate(
-                text,
-                detected_language,
-            )
-
-            roman = re.sub(
-                r"[-‐-‒–—]+$",
-                "",
-                roman,
-            ).strip()
-
-            if not roman:
-                continue
-
-            # --------------------------------------
-            # Average OCR Confidence
-            # --------------------------------------
-
-            confidence = sum(
-                float(item["confidence"])
-                for item in line_items
-            ) / len(line_items)
-
-            # --------------------------------------
-            # Combined Bounding Box
-            # --------------------------------------
-
-            box = [
-                min(
-                    item["box"][0]
-                    for item in line_items
-                ),
-                min(
-                    item["box"][1]
-                    for item in line_items
-                ),
-                max(
-                    item["box"][2]
-                    for item in line_items
-                ),
-                max(
-                    item["box"][3]
-                    for item in line_items
-                ),
+            usable_results = [
+                item
+                for item in ocr_results
+                if len("".join(item["original_text"].split())) >= 2
             ]
 
-            # --------------------------------------
-            # Debug Output
-            # --------------------------------------
+            if not usable_results:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No readable text found. Try a clearer image.",
+                )
 
-            print(f"DEBUG ORIGINAL TEXT: {text!r}")
-            print(f"DEBUG ROMAN TEXT: {roman!r}")
-
-            # --------------------------------------
-            # Store Result
-            # --------------------------------------
-
-            results.append({
-                "original_text": text,
-                "transliterated_text": roman,
-                "confidence": round(confidence, 2),
-                "box": box,
-            })
-
-        # ------------------------------------------
-        # Final Quality Check
-        # ------------------------------------------
-
-        if not results:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "We couldn't extract readable text. "
-                    "Please try a clearer street-sign image."
+            sorted_items = sorted(
+                usable_results,
+                key=lambda item: (
+                    (item["box"][1] + item["box"][3]) / 2,
+                    item["box"][0],
                 ),
             )
 
-        # ------------------------------------------
-        # API Response
-        # ------------------------------------------
+            grouped_lines = []
 
-        return {
-            "filename": file.filename,
-            "detected_language": detected_language,
-            "detection_score": round(
-                float(detection_score),
-                3,
-            ),
-            "results": results,
-        }
+            for item in sorted_items:
+                text = item["original_text"].strip()
+                box = item["box"]
 
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "We couldn't read the text in this image. "
-                "Please upload a clearer street-sign image."
-            ),
-        )
+                if not text:
+                    continue
+
+                center_y = (box[1] + box[3]) / 2
+                item_height = max(1, box[3] - box[1])
+                matched_line = None
+
+                for line in grouped_lines:
+                    line_height = max(
+                        entry["box"][3] - entry["box"][1]
+                        for entry in line["items"]
+                    )
+
+                    tolerance = max(
+                        15,
+                        max(item_height, line_height) * 0.5,
+                    )
+
+                    if abs(center_y - line["center_y"]) <= tolerance:
+                        matched_line = line
+                        break
+
+                if matched_line is None:
+                    grouped_lines.append({
+                        "center_y": center_y,
+                        "items": [item],
+                    })
+                else:
+                    matched_line["items"].append(item)
+                    matched_line["center_y"] = sum(
+                        (entry["box"][1] + entry["box"][3]) / 2
+                        for entry in matched_line["items"]
+                    ) / len(matched_line["items"])
+
+            grouped_lines.sort(key=lambda line: line["center_y"])
+            results = []
+
+            for line in grouped_lines:
+                line_items = sorted(
+                    line["items"],
+                    key=lambda item: item["box"][0],
+                )
+
+                text = " ".join(
+                    item["original_text"].strip()
+                    for item in line_items
+                    if item["original_text"].strip()
+                )
+
+                text = re.sub(r"[-‐-‒–—]+$", "", text).strip()
+
+                if not text:
+                    continue
+
+                roman = transliterate(text, detected_language)
+                roman = re.sub(r"[-‐-‒–—]+$", "", roman).strip()
+
+                if not roman:
+                    continue
+
+                confidence = sum(
+                    float(item["confidence"])
+                    for item in line_items
+                ) / len(line_items)
+
+                box = [
+                    min(item["box"][0] for item in line_items),
+                    min(item["box"][1] for item in line_items),
+                    max(item["box"][2] for item in line_items),
+                    max(item["box"][3] for item in line_items),
+                ]
+
+                results.append({
+                    "original_text": text,
+                    "transliterated_text": roman,
+                    "confidence": round(confidence, 2),
+                    "box": box,
+                })
+
+            if not results:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No readable text could be transliterated.",
+                )
+
+            return {
+                "filename": os.path.basename(file.filename),
+                "detected_language": detected_language,
+                "detection_score": round(float(detection_score), 3),
+                "results": results,
+            }
 
     except HTTPException:
         raise
 
-    except Exception as exc:
-        print(f"Image processing error: {exc}")
+    except ValueError:
+        logger.exception("Image validation or preprocessing failed")
+        raise HTTPException(
+            status_code=400,
+            detail="Unable to read the image. Please try another image.",
+        )
 
+    except Exception:
+        logger.exception("Image processing failed")
         raise HTTPException(
             status_code=500,
-            detail=(
-                "Something went wrong while processing the image. "
-                "Please try again with another image."
-            ),
+            detail="Image processing failed. Please try again.",
         )
 
     finally:
-        # ------------------------------------------
-        # Delete Temporary Files
-        # ------------------------------------------
+        await file.close()
 
-        for path in (
-            original_path,
-            processed_path,
-        ):
+        for path in (original_path, processed_path):
             try:
                 if os.path.exists(path):
                     os.remove(path)
-            except OSError as exc:
-                print(
-                    f"Warning: Could not delete {path}: {exc}"
-                )
+            except OSError:
+                logger.warning("Could not remove temporary file: %s", path)

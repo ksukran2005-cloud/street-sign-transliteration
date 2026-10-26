@@ -1,8 +1,7 @@
-import os
+﻿import os
+import gc
 
 os.environ["FLAGS_use_mkldnn"] = "0"
-
-from functools import lru_cache
 
 from paddleocr import PaddleOCR
 from language_detector import (
@@ -17,17 +16,33 @@ MIN_OCR_CONFIDENCE = 0.50
 MIN_SCRIPT_MATCH = 0.80
 MIN_DETECTION_SCORE = 0.60
 
+_current_language = None
+_current_ocr = None
 
-@lru_cache(maxsize=4)
+
 def get_ocr(language):
-    ocr_language = "ka" if language == "kn" else language
+    global _current_language, _current_ocr
 
-    return PaddleOCR(
-        lang=ocr_language,
-        use_doc_orientation_classify=False,
-        use_doc_unwarping=False,
-        use_textline_orientation=False,
-    )
+    if language not in CANDIDATE_LANGUAGES:
+        raise ValueError(f"Unsupported language: {language}")
+
+    if _current_language != language or _current_ocr is None:
+        _current_ocr = None
+        _current_language = None
+        gc.collect()
+
+        ocr_language = "ka" if language == "kn" else language
+
+        _current_ocr = PaddleOCR(
+            lang=ocr_language,
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+        )
+
+        _current_language = language
+
+    return _current_ocr
 
 
 def combined_score(ocr_confidence, script_score):
@@ -74,8 +89,10 @@ def detect_language(image_path):
                 counts = script_counts(text)
 
                 supported_letters = sum(
-                    counts[lang] for lang in SUPPORTED_LANGUAGES
+                    counts[lang]
+                    for lang in SUPPORTED_LANGUAGES
                 )
+
                 unsupported_letters = sum(
                     count
                     for lang, count in counts.items()

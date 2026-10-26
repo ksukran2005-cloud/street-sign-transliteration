@@ -1,34 +1,35 @@
 import cv2
 
+MAX_DIMENSION = 1280
+
 
 def preprocess_image(image_path, output_path):
-    """
-    Preprocess an image before OCR.
-    """
-
     image = cv2.imread(image_path)
 
     if image is None:
         raise ValueError(f"Could not read image: {image_path}")
 
-    # Upscale the image
     height, width = image.shape[:2]
 
-    scale = 2
+    longest_side = max(height, width)
 
-    resized = cv2.resize(
-        image,
-        (width * scale, height * scale),
-        interpolation=cv2.INTER_CUBIC,
-    )
+    if longest_side > MAX_DIMENSION:
+        scale = MAX_DIMENSION / longest_side
 
-    # Convert to grayscale
+        image = cv2.resize(
+            image,
+            (
+                int(width * scale),
+                int(height * scale),
+            ),
+            interpolation=cv2.INTER_AREA,
+        )
+
     gray = cv2.cvtColor(
-        resized,
+        image,
         cv2.COLOR_BGR2GRAY,
     )
 
-    # Improve local contrast
     clahe = cv2.createCLAHE(
         clipLimit=2.0,
         tileGridSize=(8, 8),
@@ -36,7 +37,6 @@ def preprocess_image(image_path, output_path):
 
     enhanced = clahe.apply(gray)
 
-    # Save processed image
     success = cv2.imwrite(
         output_path,
         enhanced,
