@@ -1,0 +1,71 @@
+# Python environments
+venv/
+ocr_venv/
+indicocr_venv/
+indicocr311_venv/
+__pycache__/
+*.py[cod]
+
+# Secrets and local configuration
+.env
+
+# Temporary images
+temp_*
+processed_*.jpg
+preprocessed*.jpg
+
+# Flutter generated files
+street_sign_app/build/
+street_sign_app/.dart_tool/
+street_sign_app/.flutter-plugins
+street_sign_app/.flutter-plugins-dependencies
+
+# IDE files
+.vscode/
+.idea/
+# Additional Flutter generated files
+street_sign_app/.idea/
+street_sign_app/.flutter-plugins-dependencies
+street_sign_app/.metadata
+
+# Python environments and cache
+venv/
+ocr_venv/
+indicocr_venv/
+indicocr311_venv/
+__pycache__/
+*.py[cod]
+
+# Secrets
+.env
+.env.*
+
+# Temporary image files
+temp_*
+processed_*.jpg
+preprocessed*.jpg
+
+# Flutter generated files
+street_sign_app/build/
+street_sign_app/.dart_tool/
+street_sign_app/.idea/
+street_sign_app/.flutter-plugins
+street_sign_app/.flutter-plugins-dependencies
+
+# IDE files
+.vscode/
+.idea/
+
+# Local test images
+street_sign.jpg
+41keZ6BvtCS._AC_UF1000,1000_QL80_.jpg
+
+# Additional Python environments
+indicocr_venv/
+indicocr311_venv/
+
+# Separate Fairseq source checkout
+fairseq-source/
+
+# Separate Fairseq source checkout
+fairseq-source/
